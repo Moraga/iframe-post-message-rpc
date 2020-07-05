@@ -1,0 +1,397 @@
+<!doctype html>
+<html>
+<body>
+<script>
+    
+/**
+ * Script back
+ */
+
+(function () {
+
+    /**
+     * Quantidade máxima de itens de histórico armazenados. Ao exceder o limite,
+     * o registro mais antigo é removido para o mais recente entrar
+     * @const {number}
+     */
+    var MAX_HISTORY_ENTRIES = 200;
+
+    /**
+     * Dados de preferência na memória
+     * @const {object}
+     */
+    var preferences = {};
+
+    /**
+     * Dados de histórico na memória
+     * @const {array}
+     */
+    var history = [];
+
+    /**
+     * Mecanismo de persistência
+     * @const
+     */
+    var storage = localStorage;
+
+    /**
+     * Última entrada no histórico
+     */
+    var view;
+
+    /**
+     * Reune todos os métodos que podem ser acessados pelo script front
+     * RPC - Remote procedure calls
+     */
+    var rpc = {};
+
+    /**
+     * Armazena uma preferência do usuário
+     * @param {string} name Nome da preferência, ex: time
+     * @param {any?} value Valor, ex: São Paulo
+     * @param {boolean?} persist Persiste a atualização no storage
+     */
+    rpc.pref = function (name, value, persist) {
+        if (value !== undefined) {
+            // valor null e arrays vazios são removidos
+            if (value === null || (value.constructor == Array && !value.length)) {
+                delete preferences[name];
+            } else {
+                preferences[name] = value;
+            }
+            if (persist === undefined || persist) {
+                save();
+            }
+        }
+        return preferences[name];
+    };
+
+    /**
+     * Armazena um conjunto de preferências do usuário
+     * @param {object} prefs Objeto com múltiplas preferências, ex: {time: "São Paulo", signo: "Sagitário"}
+     */
+    rpc.prefs = function (prefs) {
+        reload();
+        for (var name in prefs) {
+            rpc.pref(name, prefs[name], false);
+        }
+        save();
+    };
+
+    /**
+     * Acessa uma preferência no formato array
+     * @param {string} pref Nome da preferência
+     * @return {array}
+     */
+    rpc.array = function(pref) {
+        var value = preferences[pref] || [];
+        return value.constructor == Array ? value : [value];
+    };
+
+    /**
+     * Adiciona um item a em um preferências, caso o array não exista ele será criado
+     * @param {string} pref Nome da preferência
+     * @param {...any} item Item
+     * @param {array}
+     */
+    rpc.push = function(pref) {
+        return rpc.pref(pref, rpc.array(pref).concat(Array.prototype.slice.call(arguments, 1)));
+    };
+
+    /**
+     * Remove um item específico ou o último item de um array de preferências
+     * @param {string} pref Nome da preferência
+     * @param {any?} item Item a ser removido
+     */
+    rpc.pop = function(pref, item) {
+        var arr = rpc.array(pref);
+        // remove o item especificado
+        if (item !== undefined) {
+            var i = arr.indexOf(item);
+            if (i != -1) {
+                arr.splice(i, 1);
+            }
+        }
+        // remove o último item do array
+        else {
+            arr.pop();
+        }
+        rpc.pref(pref, arr);
+    };
+
+    /**
+     * Adiciona ou remove um item em um array de preferências
+     * @param {string} pref Nome da preferência
+     * @param {any} item Item
+     * @return {boolean} True se o item foi adicionado, false caso tenha sido removido
+     */
+    rpc.toggle = function(pref, item) {
+        var arr = rpc.array(pref);
+        var i = arr.indexOf(item);
+        if (i == -1) {
+            arr.push(item);
+        }
+        else {
+            arr.splice(i, 1);
+        }
+        rpc.pref(pref, arr);
+        return i == -1;
+    };
+
+    /**
+     * Verifica se um item existe em um array de preferências
+     * @param {string} pref Nome da preferência
+     * @param {any} item Item
+     * @return {boolean} True se existe, False caso contrário
+     */
+    rpc.has = function(pref, item) {
+        return rpc.array(pref).indexOf(item) > -1;
+    };
+
+    /**
+     * Adiciona um item no histórico
+     * @param {string} id Identificador do item, ex: id da matéria, URL
+     */
+    rpc.history = function (id) {
+        reload();
+        if (view) {
+            rpc.save();
+        }
+        view = [id, timestamp(), 0];
+        var size = history.unshift(view);
+        if (size > MAX_HISTORY_ENTRIES) {
+            history.splice((size - MAX_HISTORY_ENTRIES) * -1);
+        }
+        save();
+    };
+
+    /**
+     * Salva preferências e histórico em storage de persistência
+     * Calcula tempo de navegação para view atual
+     */
+    rpc.save = function () {
+        reload();
+        if (view) {
+            for (var i = 0, entry; i < history.length; ++i) {
+                entry = history[0];
+                if (entry[0] == view[0]) {
+                    entry[2] = timestamp() - entry[1];
+                    break;
+                }
+            }
+        }
+        save();
+    };
+
+    /**
+     * Recebe sinal de saída do usuário
+     */
+    rpc.quit = function () {
+        rpc.save();
+    };
+
+    /**
+     * Exemplo de envio de sugestões para o script front
+     */
+    rpc.suggestions = function () {
+        send('suggestions', [1, 2, 3]);
+    };
+
+    /**
+     * Debugger
+     */
+    rpc.debug = function () {
+        console.log({preferences: preferences, history: history});
+    };
+
+    /**
+     * Limpa preferências e histórico
+     */
+    rpc.reset = function () {
+        reset();
+        storage.removeItem('user');
+    };
+
+    /**
+     * Formata preferências e histórico para armazenagem em storage ou envio para backend
+     *
+     * Sobre o formato:
+     * - ponto-e-vírgula ";" separam conjuntos de informações
+     * - vírgula "," separa valores de um conjunto de informações
+     *
+     *                            separador
+     *  ====   conjunto 1   ====            =====   conjunto 2   ====
+     *  ----- preferências -----            -----   histórico   -----
+     * time,sao paulo,signo,sagitario;id1,2412515531,0,id2,351535,51
+     *
+     * Cada conjunto conhecemos as regras, preferências são sempre chave e valor, chave e valor
+     * sendo assim sabemos as coordenadas e histórico a mesma coisa, mas são de 3 em 3 sendo
+     * identificador da página seguido pelo timestamp* e tempo de permaência em segundos.
+     *
+     * Timestamp pode ser encurtado subtraíndo o valor por X segundos
+     *
+     * Podemos criar novos conjuntos de informações criando um novo separador ";"
+     *
+     * @return {string}
+     */
+    function serialize() {
+        var prefsArr = [];
+        for (var k in preferences) {
+            var v = preferences[k];
+            if (v.constructor == Array) {
+                v = v.join('|');
+            }
+            prefsArr.push([k,  v].join(','));
+        }
+        return [
+            prefsArr.join(','),
+            history.map(function (item) { return item.join(','); }).join(',')
+        ].join(';');
+    }
+
+    /**
+     * Deserialize uma string gerada por serialize
+     * @param {string} input String serializada
+     */
+    function unserialize(input) {
+        // reset variables
+        reset();
+
+        var x2 = [];
+
+        input += ';'
+
+        for (var i = 0, len = input.length, char, group = 0, temp = '', prop = '', list = null; i < len; ++i) {
+            char = input.charAt(i);
+
+            if (char == ';' || char == ',') {
+                if (list) {
+                    list.push(temp || null);
+                }
+
+                if (group == 0) {
+                    if (prop) {
+                        preferences[prop] = list || temp || null;
+                        prop = '';
+                    } else {
+                        prop = temp;
+                    }
+                } else {
+                    if (x2.push(list || temp) == 3) {
+                        history.push(x2);
+                        x2 = [];
+                    }
+                }
+
+                if (char == ';') {
+                    group++;
+                }
+
+                temp = '';
+                list = null;
+            } else if (char == '|') {
+                if (!list) {
+                    list = [];
+                }
+                list.push(temp || null);
+                temp = '';
+            } else {
+                temp += char;
+            }
+        }
+    }
+
+    /**
+     * Salva as informações no storage definido
+     */
+    function save() {
+        var serialized = serialize();
+        storage.setItem('user', serialized);
+    }
+
+    /**
+     * Redefine para vazio preferências e histórico da memória
+     */
+    function reset() {
+        preferences = {};
+        history = [];
+    }
+
+    /**
+     * Carrega string serializada do storage e processa gerando
+     * objetos javascript
+     */
+    function load() {
+        var serialized = storage.getItem('user');
+        if (serialized) {
+            unserialize(serialized);
+        }
+    }
+
+    /**
+     * Recarrega todos os dados
+     */
+    function reload() {
+        load();
+    }
+
+    /**
+     * Envia mensagem para script front
+     * @param {string} method Nome do método a ser executado
+     * @param {any?} params Parâmetros de execução do método no front
+     * @param {Function?} callback
+     */
+    function send(method, params, callback) {
+        var id;
+        if (callback) {
+            rpc[id = uiid()] = callback;
+        }
+        window.parent.postMessage({jsonrpc: '2.0', method: method, params: params, id: id}, '*');
+    }
+
+    // recebe mensagens do script front via postMessage
+    window.addEventListener('message', function (event) {
+        var req = event.data;
+        if (rpc.hasOwnProperty(req.method)) {
+            var res = rpc[req.method].apply(null, req.params);
+            if (req.id) {
+                send(req.id, [res]);
+            }
+        }
+    });
+
+    /**
+     * Obtém o timestamp da data e hora atual sem microsegundos
+     * @return {number}
+     */
+    function timestamp() {
+        return +new Date()/1000|0;
+    }
+
+    function uuid() {
+        var ret = '';
+        var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+        for (var i = 12; i--; ret += chars[rand(0, chars.length - 1)]);
+        return ret;
+    }
+
+    function rand(min, max) {
+        return Math.floor(Math.random() * (max - min + 1) + min);
+    }
+
+    //
+    // Inicialização
+    //
+
+    // carrega as informaçẽs do storage
+    load();
+
+    // ao terminar de carregar, notifica o script front
+    // que o script back está pronto
+    send('backendReady');
+
+})();
+
+</script>
+</body>
+</html>
